@@ -390,9 +390,10 @@ impl WinitEventLoop {
     ///
     /// The linked [`WinitGraphicsBackend`] will error with a lost context and should
     /// not be used anymore as well.
-    pub fn dispatch_new_events<F>(&mut self, mut callback: F) -> Result<(), WinitError>
+    pub fn dispatch_new_events<F, C>(&mut self, mut callback: F, mut my_callback: C) -> Result<(), WinitError>
     where
         F: FnMut(WinitEvent),
+        C: FnMut(WindowEvent),
     {
         use self::WinitEvent::*;
 
@@ -421,169 +422,174 @@ impl WinitEventLoop {
             }
 
             self.events_loop
-                .run_return(move |event, _target, control_flow| match event {
-                    Event::RedrawEventsCleared => {
-                        *control_flow = ControlFlow::Exit;
-                    }
-                    Event::RedrawRequested(_id) => {
-                        callback(WinitEvent::Refresh);
-                    }
-                    Event::WindowEvent { event, .. } => {
-                        let duration = Instant::now().duration_since(*time);
-                        let nanos = duration.subsec_nanos() as u64;
-                        let time = ((1000 * duration.as_secs()) + (nanos / 1_000_000)) as u32;
-                        match event {
-                            WindowEvent::Resized(psize) => {
-                                trace!(logger, "Resizing window to {:?}", psize);
-                                let scale_factor = window.scale_factor();
-                                let mut wsize = window_size.borrow_mut();
-                                let (pw, ph): (u32, u32) = psize.into();
-                                wsize.physical_size = (pw as i32, ph as i32).into();
-                                wsize.scale_factor = scale_factor;
-
-                                resize_notification.set(Some(wsize.physical_size));
-
-                                callback(WinitEvent::Resized {
-                                    size: wsize.physical_size,
-                                    scale_factor,
-                                });
-                            }
-                            WindowEvent::Focused(focus) => {
-                                callback(WinitEvent::Focus(focus));
-                            }
-
-                            WindowEvent::ScaleFactorChanged {
-                                scale_factor,
-                                new_inner_size: new_psize,
-                            } => {
-                                let mut wsize = window_size.borrow_mut();
-                                wsize.scale_factor = scale_factor;
-
-                                let (pw, ph): (u32, u32) = (*new_psize).into();
-                                resize_notification.set(Some((pw as i32, ph as i32).into()));
-
-                                callback(WinitEvent::Resized {
-                                    size: (pw as i32, ph as i32).into(),
-                                    scale_factor: wsize.scale_factor,
-                                });
-                            }
-                            WindowEvent::KeyboardInput {
-                                input: KeyboardInput { scancode, state, .. },
-                                ..
-                            } => {
-                                match state {
-                                    ElementState::Pressed => *key_counter += 1,
-                                    ElementState::Released => {
-                                        *key_counter = key_counter.checked_sub(1).unwrap_or(0)
-                                    }
-                                };
-                                callback(Input(InputEvent::Keyboard {
-                                    event: WinitKeyboardInputEvent {
-                                        time,
-                                        key: scancode,
-                                        count: *key_counter,
-                                        state,
-                                    },
-                                }));
-                            }
-                            WindowEvent::CursorMoved { position, .. } => {
-                                let lpos = position.to_logical(window_size.borrow().scale_factor);
-                                callback(Input(InputEvent::PointerMotionAbsolute {
-                                    event: WinitMouseMovedEvent {
-                                        size: window_size.clone(),
-                                        time,
-                                        logical_position: lpos,
-                                    },
-                                }));
-                            }
-                            WindowEvent::MouseWheel { delta, .. } => {
-                                let event = WinitMouseWheelEvent { time, delta };
-                                callback(Input(InputEvent::PointerAxis { event }));
-                            }
-                            WindowEvent::MouseInput { state, button, .. } => {
-                                callback(Input(InputEvent::PointerButton {
-                                    event: WinitMouseInputEvent {
-                                        time,
-                                        button,
-                                        state,
-                                        is_x11,
-                                    },
-                                }));
-                            }
-
-                            WindowEvent::Touch(Touch {
-                                phase: TouchPhase::Started,
-                                location,
-                                id,
-                                ..
-                            }) => {
-                                let location = location.to_logical(window_size.borrow().scale_factor);
-                                callback(Input(InputEvent::TouchDown {
-                                    event: WinitTouchStartedEvent {
-                                        size: window_size.clone(),
-                                        time,
-                                        location,
-                                        id,
-                                    },
-                                }));
-                            }
-                            WindowEvent::Touch(Touch {
-                                phase: TouchPhase::Moved,
-                                location,
-                                id,
-                                ..
-                            }) => {
-                                let location = location.to_logical(window_size.borrow().scale_factor);
-                                callback(Input(InputEvent::TouchMotion {
-                                    event: WinitTouchMovedEvent {
-                                        size: window_size.clone(),
-                                        time,
-                                        location,
-                                        id,
-                                    },
-                                }));
-                            }
-
-                            WindowEvent::Touch(Touch {
-                                phase: TouchPhase::Ended,
-                                location,
-                                id,
-                                ..
-                            }) => {
-                                let location = location.to_logical(window_size.borrow().scale_factor);
-                                callback(Input(InputEvent::TouchMotion {
-                                    event: WinitTouchMovedEvent {
-                                        size: window_size.clone(),
-                                        time,
-                                        location,
-                                        id,
-                                    },
-                                }));
-                                callback(Input(InputEvent::TouchUp {
-                                    event: WinitTouchEndedEvent { time, id },
-                                }))
-                            }
-
-                            WindowEvent::Touch(Touch {
-                                phase: TouchPhase::Cancelled,
-                                id,
-                                ..
-                            }) => {
-                                callback(Input(InputEvent::TouchCancel {
-                                    event: WinitTouchCancelledEvent { time, id },
-                                }));
-                            }
-                            WindowEvent::CloseRequested | WindowEvent::Destroyed => {
-                                callback(Input(InputEvent::DeviceRemoved {
-                                    device: WinitVirtualDevice,
-                                }));
-                                warn!(logger, "Window closed");
-                                *closed_ptr = true;
-                            }
-                            _ => {}
+                .run_return(move |event, _target, control_flow| {
+                    match event {
+                        Event::RedrawEventsCleared => {
+                            *control_flow = ControlFlow::Exit;
                         }
+                        Event::RedrawRequested(_id) => {
+                            callback(WinitEvent::Refresh);
+                        }
+                        Event::WindowEvent { event, .. } => {
+                            let duration = Instant::now().duration_since(*time);
+                            let nanos = duration.subsec_nanos() as u64;
+                            let time = ((1000 * duration.as_secs()) + (nanos / 1_000_000)) as u32;
+                            match &event {
+                                WindowEvent::Resized(psize) => {
+                                    trace!(logger, "Resizing window to {:?}", psize);
+                                    let scale_factor = window.scale_factor();
+                                    let mut wsize = window_size.borrow_mut();
+                                    let (pw, ph): (u32, u32) = (psize.clone()).into();
+                                    wsize.physical_size = (pw as i32, ph as i32).into();
+                                    wsize.scale_factor = scale_factor;
+
+                                    resize_notification.set(Some(wsize.physical_size));
+
+                                    callback(WinitEvent::Resized {
+                                        size: wsize.physical_size,
+                                        scale_factor,
+                                    });
+                                }
+                                WindowEvent::Focused(focus) => {
+                                    callback(WinitEvent::Focus(*focus));
+                                }
+
+                                WindowEvent::ScaleFactorChanged {
+                                    scale_factor,
+                                    new_inner_size: new_psize,
+                                } => {
+                                    let mut wsize = window_size.borrow_mut();
+                                    wsize.scale_factor = *scale_factor;
+
+                                    let x = **new_psize;
+                                    let (pw, ph): (u32, u32) = x.into();
+                                    resize_notification.set(Some((pw as i32, ph as i32).into()));
+
+                                    callback(WinitEvent::Resized {
+                                        size: (pw as i32, ph as i32).into(),
+                                        scale_factor: wsize.scale_factor,
+                                    });
+                                }
+                                WindowEvent::KeyboardInput {
+                                    input: KeyboardInput { scancode, state, .. },
+                                    ..
+                                } => {
+                                    match state {
+                                        ElementState::Pressed => *key_counter += 1,
+                                        ElementState::Released => {
+                                            *key_counter = key_counter.checked_sub(1).unwrap_or(0)
+                                        }
+                                    };
+                                    callback(Input(InputEvent::Keyboard {
+                                        event: WinitKeyboardInputEvent {
+                                            time,
+                                            key: *scancode,
+                                            count: *key_counter,
+                                            state: *state,
+                                        },
+                                    }));
+                                }
+                                WindowEvent::CursorMoved { position, .. } => {
+                                    let lpos = position.to_logical(window_size.borrow().scale_factor);
+                                    callback(Input(InputEvent::PointerMotionAbsolute {
+                                        event: WinitMouseMovedEvent {
+                                            size: window_size.clone(),
+                                            time,
+                                            logical_position: lpos,
+                                        },
+                                    }));
+                                }
+                                WindowEvent::MouseWheel { delta, .. } => {
+                                    let event = WinitMouseWheelEvent { time, delta: *delta };
+                                    callback(Input(InputEvent::PointerAxis { event }));
+                                }
+                                WindowEvent::MouseInput { state, button, .. } => {
+                                    callback(Input(InputEvent::PointerButton {
+                                        event: WinitMouseInputEvent {
+                                            time,
+                                            button: *button,
+                                            state: *state,
+                                            is_x11,
+                                        },
+                                    }));
+                                }
+
+                                WindowEvent::Touch(Touch {
+                                                       phase: TouchPhase::Started,
+                                                       location,
+                                                       id,
+                                                       ..
+                                                   }) => {
+                                    let location = location.to_logical(window_size.borrow().scale_factor);
+                                    callback(Input(InputEvent::TouchDown {
+                                        event: WinitTouchStartedEvent {
+                                            size: window_size.clone(),
+                                            time,
+                                            location,
+                                            id: *id,
+                                        },
+                                    }));
+                                }
+                                WindowEvent::Touch(Touch {
+                                                       phase: TouchPhase::Moved,
+                                                       location,
+                                                       id,
+                                                       ..
+                                                   }) => {
+                                    let location = location.to_logical(window_size.borrow().scale_factor);
+                                    callback(Input(InputEvent::TouchMotion {
+                                        event: WinitTouchMovedEvent {
+                                            size: window_size.clone(),
+                                            time,
+                                            location,
+                                            id: *id,
+                                        },
+                                    }));
+                                }
+
+                                WindowEvent::Touch(Touch {
+                                                       phase: TouchPhase::Ended,
+                                                       location,
+                                                       id,
+                                                       ..
+                                                   }) => {
+                                    let location = location.to_logical(window_size.borrow().scale_factor);
+                                    callback(Input(InputEvent::TouchMotion {
+                                        event: WinitTouchMovedEvent {
+                                            size: window_size.clone(),
+                                            time,
+                                            location,
+                                            id: *id,
+                                        },
+                                    }));
+                                    callback(Input(InputEvent::TouchUp {
+                                        event: WinitTouchEndedEvent { time, id: *id, },
+                                    }))
+                                }
+
+                                WindowEvent::Touch(Touch {
+                                                       phase: TouchPhase::Cancelled,
+                                                       id,
+                                                       ..
+                                                   }) => {
+                                    callback(Input(InputEvent::TouchCancel {
+                                        event: WinitTouchCancelledEvent { time, id: *id, },
+                                    }));
+                                }
+                                WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                                    callback(Input(InputEvent::DeviceRemoved {
+                                        device: WinitVirtualDevice,
+                                    }));
+                                    warn!(logger, "Window closed");
+                                    *closed_ptr = true;
+                                }
+                                _ => {}
+                            };
+
+                            my_callback(event);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 });
         }
 

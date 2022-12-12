@@ -182,7 +182,7 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             },
             _ => (),
-        })?;
+        }, |_| {})?;
 
         backend.bind().unwrap();
 
